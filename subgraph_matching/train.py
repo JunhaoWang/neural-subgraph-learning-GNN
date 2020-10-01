@@ -133,10 +133,10 @@ def train(args, model, logger, in_queue, out_queue):
             out_queue.put(("step", (loss.item(), acc)))
 
 def train_loop(args):
-    if not os.path.exists(os.path.dirname(args.model_path)):
-        os.makedirs(os.path.dirname(args.model_path))
-    if not os.path.exists("plots/"):
-        os.makedirs("plots/")
+    # if not os.path.exists(os.path.dirname(args.model_path)):
+    #     os.makedirs(os.path.dirname(args.model_path))
+    # if not os.path.exists("plots/"):
+    #     os.makedirs("plots/")
 
     print("Starting {} workers".format(args.n_workers))
     in_queue, out_queue = mp.Queue(), mp.Queue()
@@ -147,7 +147,7 @@ def train_loop(args):
         "margin", "dataset", "dataset_type", "max_graph_size", "skip"]
     args_str = ".".join(["{}={}".format(k, v)
         for k, v in sorted(vars(args).items()) if k in record_keys])
-    logger = SummaryWriter(comment=args_str)
+    logger = None # SummaryWriter(comment=args_str)
 
     model = build_model(args)
     model.share_memory()
@@ -170,7 +170,7 @@ def train_loop(args):
         neg_a = neg_a.to(torch.device("cpu"))
         neg_b = neg_b.to(torch.device("cpu"))
         test_pts.append((pos_a, pos_b, neg_a, neg_b))
-
+        break
     workers = []
     for i in range(args.n_workers):
         worker = mp.Process(target=train, args=(args, model, data_source,
@@ -190,10 +190,10 @@ def train_loop(args):
                 train_loss, train_acc = params
                 print("Batch {}. Loss: {:.4f}. Training acc: {:.4f}".format(
                     batch_n, train_loss, train_acc), end="               \r")
-                logger.add_scalar("Loss/train", train_loss, batch_n)
-                logger.add_scalar("Accuracy/train", train_acc, batch_n)
+                # logger.add_scalar("Loss/train", train_loss, batch_n)
+                # logger.add_scalar("Accuracy/train", train_acc, batch_n)
                 batch_n += 1
-            validation(args, model, test_pts, logger, batch_n, epoch)
+            # validation(args, model, test_pts, logger, batch_n, epoch)
 
     for i in range(args.n_workers):
         in_queue.put(("done", None))
@@ -209,6 +209,8 @@ def main(force_test=False):
     utils.parse_optimizer(parser)
     parse_encoder(parser)
     args = parser.parse_args()
+    print(args)
+    args.n_workers = 1
 
     if force_test:
         args.test = True

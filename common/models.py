@@ -85,6 +85,7 @@ class SkipLastGNN(nn.Module):
         super(SkipLastGNN, self).__init__()
         self.dropout = args.dropout
         self.n_layers = args.n_layers
+        args.num_relations = 90 # aifb
 
         if len(feature_preprocess.FEATURE_AUGMENT) > 0:
             self.feat_preprocess = feature_preprocess.Preprocess(input_dim)
@@ -96,6 +97,7 @@ class SkipLastGNN(nn.Module):
             args.conv_type == "PNA" else hidden_dim))
 
         conv_model = self.build_conv_model(args.conv_type, 1)
+
         if args.conv_type == "PNA":
             self.convs_sum = nn.ModuleList()
             self.convs_mean = nn.ModuleList()
@@ -116,6 +118,8 @@ class SkipLastGNN(nn.Module):
                 self.convs_sum.append(conv_model(3*hidden_input_dim, hidden_dim))
                 self.convs_mean.append(conv_model(3*hidden_input_dim, hidden_dim))
                 self.convs_max.append(conv_model(3*hidden_input_dim, hidden_dim))
+            elif args.conv_type == "RGCN":
+                self.convs.append(conv_model(hidden_input_dim, hidden_dim, args.num_relations))
             else:
                 self.convs.append(conv_model(hidden_input_dim, hidden_dim))
 
@@ -152,6 +156,8 @@ class SkipLastGNN(nn.Module):
             return lambda i, h: pyg_nn.GatedGraphConv(h, n_inner_layers)
         elif model_type == "PNA":
             return SAGEConv
+        elif model_type == "RGCN":
+            return pyg_nn.RGCNConv
         else:
             print("unrecognized model type")
 
@@ -164,8 +170,13 @@ class SkipLastGNN(nn.Module):
             if not hasattr(data, "preprocessed"):
                 data = self.feat_preprocess(data)
                 data.preprocessed = True
-        x, edge_index, batch = data.node_feature, data.edge_index, data.batch
-        x = self.pre_mp(x)
+        if 'aifb' == 'aifb':
+            x, edge_index, batch, edge_type = data.node_feature, data.edge_index, data.batch, data.edge_feature
+            edge_type = edge_type.reshape(-1)
+            x = self.pre_mp(x)
+        else:
+            x, edge_index, batch = data.node_feature, data.edge_index, data.batch
+            x = self.pre_mp(x)
 
         all_emb = x.unsqueeze(1)
         emb = x
@@ -180,6 +191,9 @@ class SkipLastGNN(nn.Module):
                     x = torch.cat((self.convs_sum[i](curr_emb, edge_index),
                         self.convs_mean[i](curr_emb, edge_index),
                         self.convs_max[i](curr_emb, edge_index)), dim=-1)
+                elif self.conv_type == "RGCN":
+                    # edge_type_ = torch.randint_like(edge_index, low=0, high=2)[1].detach().to(edge_index.device)
+                    x = self.convs[i](curr_emb, edge_index, edge_type)
                 else:
                     x = self.convs[i](curr_emb, edge_index)
             elif self.skip == 'all':

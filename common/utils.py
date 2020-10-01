@@ -230,6 +230,31 @@ def batch_nx_graphs(graphs, anchors=None):
         for anchor, g in zip(anchors, graphs):
             for v in g.nodes:
                 g.nodes[v]["node_feature"] = torch.tensor([float(v == anchor)])
+    if 'aifb' == 'aifb':
+        # 90 edge types
+        for anchor, g in zip(anchors, graphs):
+            for e in g.edges:
+                # tmp = torch.zeros(90)
+                # tmp[g.edges[e]['edge_type']] = 1.
+                g.edges[e]["edge_feature"] = torch.tensor([g.edges[e]['edge_type']], dtype=torch.long)
+
+    batch = Batch.from_data_list(GraphDataset.list_to_graphs(graphs))
+    batch = augmenter.augment(batch)
+    batch = batch.to(get_device())
+    return batch
+
+
+def batch_nx_graphs_multi(graphs, anchors=None):
+    # motifs_batch = [pyg_utils.from_networkx(
+    #    nx.convert_node_labels_to_integers(graph)) for graph in graphs]
+    # loader = DataLoader(motifs_batch, batch_size=len(motifs_batch))
+    # for b in loader: batch = b
+    augmenter = feature_preprocess.FeatureAugment()
+
+    if anchors is not None:
+        for anchor, g in zip(anchors, graphs):
+            for v in g.nodes:
+                g.nodes[v]["node_feature"] = torch.tensor([float(v == anchor)])
 
     batch = Batch.from_data_list(GraphDataset.list_to_graphs(graphs))
     batch = augmenter.augment(batch)

@@ -1,3 +1,5 @@
+import sys
+sys.path.append('./')
 from common import utils
 from collections import defaultdict
 from datetime import datetime

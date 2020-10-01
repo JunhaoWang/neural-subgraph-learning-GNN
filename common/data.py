@@ -7,6 +7,7 @@ from deepsnap.batch import Batch
 from deepsnap.dataset import GraphDataset, Generator
 import networkx as nx
 import numpy as np
+from copy import deepcopy
 from sklearn.manifold import TSNE
 import torch
 import torch.multiprocessing as mp
@@ -14,7 +15,7 @@ import torch.nn.functional as F
 import torch.optim as optim
 from torch_geometric.data import DataLoader
 from torch.utils.data import DataLoader as TorchDataLoader
-from torch_geometric.datasets import TUDataset, PPI, QM9
+from torch_geometric.datasets import TUDataset, PPI, QM9, Entities
 import torch_geometric.utils as pyg_utils
 import torch_geometric.nn as pyg_nn
 from tqdm import tqdm
@@ -53,6 +54,8 @@ def load_dataset(name):
         dataset = QM9(root="/tmp/QM9")
     elif name == "atlas":
         dataset = [g for g in nx.graph_atlas_g()[1:] if nx.is_connected(g)]
+    elif name == 'aifb':
+        dataset = Entities(root="/tmp/aifb", name='AIFB') # 90 edge types
     if task == "graph":
         train_len = int(0.8 * len(dataset))
         train, test = [], []
@@ -62,11 +65,19 @@ def load_dataset(name):
         for i, graph in tqdm(enumerate(dataset)):
             if not type(graph) == nx.Graph:
                 if has_name: del graph.name
-                graph = pyg_utils.to_networkx(graph).to_undirected()
-            if i < train_len:
-                train.append(graph)
+                if name != 'aifb':
+                    graph = pyg_utils.to_networkx(graph).to_undirected()
+                else:
+                    graph = pyg_utils.to_networkx(graph, edge_attrs=['edge_type'])
+            if name != 'aifb':
+                if i < train_len:
+                    train.append(graph)
+                else:
+                    test.append(graph)
             else:
-                test.append(graph)
+                train.append(graph)
+                test.append(deepcopy(graph))
+
     return train, test, task
 
 class DataSource:
@@ -283,6 +294,78 @@ class DiskDataSource(DataSource):
         use_distributed_sampling=False):
         loaders = [[batch_size]*(size // batch_size) for i in range(3)]
         return loaders
+
+    def gen_batch(self, a, b, c, train, max_size=15, min_size=5, seed=None,
+        filter_negs=False, sample_method="tree-pair"):
+        batch_size = a
+        train_set, test_set, task = self.dataset
+        graphs = train_set if train else test_set
+        if seed is not None:
+            random.seed(seed)
+
+        pos_a, pos_b = [], []
+        pos_a_anchors, pos_b_anchors = [], []
+        for i in range(batch_size // 2):
+            if sample_method == "tree-pair":
+                size = random.randint(min_size+1, max_size)
+                graph, a = utils.sample_neigh(graphs, size)
+                b = a[:random.randint(min_size, len(a) - 1)]
+            elif sample_method == "subgraph-tree":
+                graph = None
+                while graph is None or len(graph) < min_size + 1:
+                    graph = random.choice(graphs)
+                a = graph.nodes
+                _, b = utils.sample_neigh([graph], random.randint(min_size,
+                    len(graph) - 1))
+            if self.node_anchored:
+                anchor = list(graph.nodes)[0]
+                pos_a_anchors.append(anchor)
+                pos_b_anchors.append(anchor)
+            neigh_a, neigh_b = graph.subgraph(a), graph.subgraph(b)
+            pos_a.append(neigh_a)
+            pos_b.append(neigh_b)
+
+        neg_a, neg_b = [], []
+        neg_a_anchors, neg_b_anchors = [], []
+        while len(neg_a) < batch_size // 2:
+            if sample_method == "tree-pair":
+                size = random.randint(min_size+1, max_size)
+                graph_a, a = utils.sample_neigh(graphs, size)
+                graph_b, b = utils.sample_neigh(graphs, random.randint(min_size,
+                    size - 1))
+            elif sample_method == "subgraph-tree":
+                graph_a = None
+                while graph_a is None or len(graph_a) < min_size + 1:
+                    graph_a = random.choice(graphs)
+                a = graph_a.nodes
+                graph_b, b = utils.sample_neigh(graphs, random.randint(min_size,
+                    len(graph_a) - 1))
+            if self.node_anchored:
+                neg_a_anchors.append(list(graph_a.nodes)[0])
+                neg_b_anchors.append(list(graph_b.nodes)[0])
+            neigh_a, neigh_b = graph_a.subgraph(a), graph_b.subgraph(b)
+            if filter_negs:
+                matcher = nx.algorithms.isomorphism.GraphMatcher(neigh_a, neigh_b)
+                if matcher.subgraph_is_isomorphic(): # a <= b (b is subgraph of a)
+                    continue
+            neg_a.append(neigh_a)
+            neg_b.append(neigh_b)
+
+        pos_a = utils.batch_nx_graphs(pos_a, anchors=pos_a_anchors if
+            self.node_anchored else None)
+        pos_b = utils.batch_nx_graphs(pos_b, anchors=pos_b_anchors if
+            self.node_anchored else None)
+        neg_a = utils.batch_nx_graphs(neg_a, anchors=neg_a_anchors if
+            self.node_anchored else None)
+        neg_b = utils.batch_nx_graphs(neg_b, anchors=neg_b_anchors if
+            self.node_anchored else None)
+        return pos_a, pos_b, neg_a, neg_b
+
+
+class DiskDataSourceMulti(DiskDataSource):
+    def __init__(self, dataset_name, node_anchored=False, min_size=5,
+        max_size=29):
+        super().__init__(dataset_name, node_anchored, min_size, max_size)
 
     def gen_batch(self, a, b, c, train, max_size=15, min_size=5, seed=None,
         filter_negs=False, sample_method="tree-pair"):
