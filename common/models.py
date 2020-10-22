@@ -85,7 +85,7 @@ class SkipLastGNN(nn.Module):
         super(SkipLastGNN, self).__init__()
         self.dropout = args.dropout
         self.n_layers = args.n_layers
-        args.num_relations = 90 # aifb
+        args.num_relations = 18 # wn18 # 90 # aifb
 
         if len(feature_preprocess.FEATURE_AUGMENT) > 0:
             self.feat_preprocess = feature_preprocess.Preprocess(input_dim)
@@ -170,7 +170,7 @@ class SkipLastGNN(nn.Module):
             if not hasattr(data, "preprocessed"):
                 data = self.feat_preprocess(data)
                 data.preprocessed = True
-        if 'aifb' == 'aifb':
+        if 'aifb' == 'aifb' or 'wn18' == 'wn18':
             x, edge_index, batch, edge_type = data.node_feature, data.edge_index, data.batch, data.edge_feature
             edge_type = edge_type.reshape(-1)
             x = self.pre_mp(x)

@@ -42,9 +42,9 @@ def parse_encoder(parser, arg_str=None):
     enc_parser.add_argument('--tag', type=str,
         help='tag to identify the run')
 
-    enc_parser.set_defaults(conv_type='RGCN', # conv_type='SAGE',
+    enc_parser.set_defaults(conv_type='RGCN',
                         method_type='order',
-                        dataset='aifb',
+                        dataset='fb15k237',
                         n_layers=8,
                         batch_size=64,
                         hidden_dim=64,

@@ -17,6 +17,7 @@ from common import feature_preprocess
 def sample_neigh(graphs, size):
     ps = np.array([len(g) for g in graphs], dtype=np.float)
     ps /= np.sum(ps)
+    
     dist = stats.rv_discrete(values=(np.arange(len(graphs)), ps))
     while True:
         idx = dist.rvs()
@@ -230,12 +231,13 @@ def batch_nx_graphs(graphs, anchors=None):
         for anchor, g in zip(anchors, graphs):
             for v in g.nodes:
                 g.nodes[v]["node_feature"] = torch.tensor([float(v == anchor)])
-    if 'aifb' == 'aifb':
+    if 'aifb' == 'aifb' or 'wn18' == 'wn18':
         # 90 edge types
-        for anchor, g in zip(anchors, graphs):
+        for g in graphs:
             for e in g.edges:
                 # tmp = torch.zeros(90)
                 # tmp[g.edges[e]['edge_type']] = 1.
+                
                 g.edges[e]["edge_feature"] = torch.tensor([g.edges[e]['edge_type']], dtype=torch.long)
 
     batch = Batch.from_data_list(GraphDataset.list_to_graphs(graphs))

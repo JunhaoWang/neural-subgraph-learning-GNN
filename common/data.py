@@ -15,7 +15,8 @@ import torch.nn.functional as F
 import torch.optim as optim
 from torch_geometric.data import DataLoader
 from torch.utils.data import DataLoader as TorchDataLoader
-from torch_geometric.datasets import TUDataset, PPI, QM9, Entities
+from torch_geometric.datasets import TUDataset, PPI, QM9, Entities, WordNet18
+from stellargraph.datasets import FB15k_237
 import torch_geometric.utils as pyg_utils
 import torch_geometric.nn as pyg_nn
 from tqdm import tqdm
@@ -25,6 +26,7 @@ import scipy.stats as stats
 from common import combined_syn
 from common import feature_preprocess
 from common import utils
+from copy import deepcopy
 
 def load_dataset(name):
     """ Load real-world datasets, available in PyTorch Geometric.
@@ -56,27 +58,60 @@ def load_dataset(name):
         dataset = [g for g in nx.graph_atlas_g()[1:] if nx.is_connected(g)]
     elif name == 'aifb':
         dataset = Entities(root="/tmp/aifb", name='AIFB') # 90 edge types
+    elif name == 'wn18':
+        dataset = WordNet18(root="/tmp/wn18")
+    elif name == 'fb15k237':
+        dataset = [None]
     if task == "graph":
         train_len = int(0.8 * len(dataset))
         train, test = [], []
-        dataset = list(dataset)
-        random.shuffle(dataset)
-        has_name = hasattr(dataset[0], "name")
+        if name not in ['aifb', 'wn18', 'fb15k237']:
+            dataset = list(dataset)
+            random.shuffle(dataset)
+            has_name = hasattr(dataset[0], "name")
+        else:
+            has_name = True
         for i, graph in tqdm(enumerate(dataset)):
             if not type(graph) == nx.Graph:
-                if has_name: del graph.name
-                if name != 'aifb':
-                    graph = pyg_utils.to_networkx(graph).to_undirected()
-                else:
+                try:
+                    if has_name: del graph.name
+                except:
+                    pass
+                if name == 'aifb':
                     graph = pyg_utils.to_networkx(graph, edge_attrs=['edge_type'])
-            if name != 'aifb':
+                elif name == 'wn18':
+                    graph = pyg_utils.to_networkx(graph, edge_attrs=['edge_type'])
+                elif name == 'fb15k237':
+                    data = FB15k_237()
+                    (graph, _, _, _) = data.load()
+                    graph = graph.to_networkx()
+                    edge_type_dict = []
+                    for j in graph.edges:
+                        edge_type_dict.append(graph.edges[j]['label'])
+                    edge_type_dict = {i: ind for ind, i in enumerate(sorted(set(edge_type_dict)))}
+
+                    for j in graph.edges:
+                        graph.edges[j]['edge_type'] = edge_type_dict[graph.edges[j]['label']]
+                        del graph.edges[j]['label']
+                        del graph.edges[j]['weight']
+                else:
+                    graph = pyg_utils.to_networkx(graph).to_undirected()
+            if name == 'aifb':
+                train.append(graph)
+                test.append(deepcopy(graph))
+            elif name == 'wn18':
+                train.append(graph)
+                test.append(deepcopy(graph))
+            elif name == 'fb15k237':
+                train.append(graph)
+                test.append(deepcopy(graph))
+            else:
                 if i < train_len:
                     train.append(graph)
                 else:
                     test.append(graph)
-            else:
-                train.append(graph)
-                test.append(deepcopy(graph))
+                    
+           
 
     return train, test, task
 
@@ -267,13 +302,20 @@ class OTFSynImbalancedDataSource(OTFSynDataSource):
                 print("loaded", fn)
                 pos_a, pos_b, neg_a, neg_b = pickle.load(f)
         print(len(pos_a), len(neg_a))
+        nx_graphs = (
+            deepcopy(pos_a),
+            deepcopy(pos_b),
+            deepcopy(neg_a),
+            deepcopy(neg_b),
+        )
+        
         if pos_a:
             pos_a = utils.batch_nx_graphs(pos_a)
             pos_b = utils.batch_nx_graphs(pos_b)
         neg_a = utils.batch_nx_graphs(neg_a)
         neg_b = utils.batch_nx_graphs(neg_b)
         self.batch_idx += 1
-        return pos_a, pos_b, neg_a, neg_b
+        return pos_a, pos_b, neg_a, neg_b, nx_graphs
 
 class DiskDataSource(DataSource):
     """ Uses a set of graphs saved in a dataset file to train the subgraph model.
@@ -296,20 +338,29 @@ class DiskDataSource(DataSource):
         return loaders
 
     def gen_batch(self, a, b, c, train, max_size=15, min_size=5, seed=None,
-        filter_negs=False, sample_method="tree-pair"):
+        filter_negs=False, sample_method="tree-pair", one_small=False):
         batch_size = a
         train_set, test_set, task = self.dataset
+        
         graphs = train_set if train else test_set
         if seed is not None:
             random.seed(seed)
-
+        
+        
         pos_a, pos_b = [], []
         pos_a_anchors, pos_b_anchors = [], []
         for i in range(batch_size // 2):
             if sample_method == "tree-pair":
                 size = random.randint(min_size+1, max_size)
                 graph, a = utils.sample_neigh(graphs, size)
-                b = a[:random.randint(min_size, len(a) - 1)]
+
+                # hack
+                if one_small:
+                    np.random.shuffle(a)
+                    b = a[1:]
+                # hack
+                else:
+                    b = a[:random.randint(min_size, len(a) - 1)]
             elif sample_method == "subgraph-tree":
                 graph = None
                 while graph is None or len(graph) < min_size + 1:
@@ -329,10 +380,19 @@ class DiskDataSource(DataSource):
         neg_a_anchors, neg_b_anchors = [], []
         while len(neg_a) < batch_size // 2:
             if sample_method == "tree-pair":
-                size = random.randint(min_size+1, max_size)
-                graph_a, a = utils.sample_neigh(graphs, size)
-                graph_b, b = utils.sample_neigh(graphs, random.randint(min_size,
-                    size - 1))
+
+                # hack
+                if one_small:
+                    size = random.randint(min_size + 1, max_size)
+                    graph_a, a = utils.sample_neigh(graphs, size)
+                    graph_b, b = deepcopy((graph_a, a))
+                    b = b[1:]
+                # hack
+                else:
+                    size = random.randint(min_size + 1, max_size)
+                    graph_a, a = utils.sample_neigh(graphs, size)
+                    graph_b, b = utils.sample_neigh(graphs, random.randint(min_size,
+                        size - 1))
             elif sample_method == "subgraph-tree":
                 graph_a = None
                 while graph_a is None or len(graph_a) < min_size + 1:
@@ -343,14 +403,38 @@ class DiskDataSource(DataSource):
             if self.node_anchored:
                 neg_a_anchors.append(list(graph_a.nodes)[0])
                 neg_b_anchors.append(list(graph_b.nodes)[0])
-            neigh_a, neigh_b = graph_a.subgraph(a), graph_b.subgraph(b)
+            if one_small:
+                neigh_a, neigh_b = graph_a.subgraph(a), graph_b.subgraph(b)
+                tmp = list(nx.connected_components(neigh_b.to_undirected()))
+                tmp = sorted(tmp, key=lambda x: -len(x))
+                neigh_b = neigh_b.subgraph(tmp[0])
+                b_ne = list(nx.non_edges(neigh_b))
+                np.random.shuffle(b_ne)
+                b_ne = b_ne[:np.random.randint(1, 3)]
+                neigh_b = nx.DiGraph(neigh_b)
+                neigh_b.add_edges_from(b_ne)
+                for i in b_ne:
+                    neigh_b.edges[i]['edge_type'] = np.random.randint(0, 18)
+            else:
+                neigh_a, neigh_b = graph_a.subgraph(a), graph_b.subgraph(b)
             if filter_negs:
                 matcher = nx.algorithms.isomorphism.GraphMatcher(neigh_a, neigh_b)
                 if matcher.subgraph_is_isomorphic(): # a <= b (b is subgraph of a)
                     continue
             neg_a.append(neigh_a)
             neg_b.append(neigh_b)
-
+        
+        nx_graphs = (
+            deepcopy(pos_a),
+            deepcopy(pos_b),
+            deepcopy(neg_a),
+            deepcopy(neg_b),
+            deepcopy(pos_a_anchors),
+            deepcopy(pos_b_anchors),
+            deepcopy(neg_a_anchors),
+            deepcopy(neg_b_anchors),
+        )
+        
         pos_a = utils.batch_nx_graphs(pos_a, anchors=pos_a_anchors if
             self.node_anchored else None)
         pos_b = utils.batch_nx_graphs(pos_b, anchors=pos_b_anchors if
@@ -359,7 +443,7 @@ class DiskDataSource(DataSource):
             self.node_anchored else None)
         neg_b = utils.batch_nx_graphs(neg_b, anchors=neg_b_anchors if
             self.node_anchored else None)
-        return pos_a, pos_b, neg_a, neg_b
+        return pos_a, pos_b, neg_a, neg_b, nx_graphs
 
 
 class DiskDataSourceMulti(DiskDataSource):
@@ -422,7 +506,18 @@ class DiskDataSourceMulti(DiskDataSource):
                     continue
             neg_a.append(neigh_a)
             neg_b.append(neigh_b)
-
+        
+        nx_graphs = (
+            deepcopy(pos_a),
+            deepcopy(pos_b),
+            deepcopy(neg_a),
+            deepcopy(neg_b),
+            deepcopy(pos_a_anchors),
+            deepcopy(pos_b_anchors),
+            deepcopy(neg_a_anchors),
+            deepcopy(neg_b_anchors),
+        )
+        
         pos_a = utils.batch_nx_graphs(pos_a, anchors=pos_a_anchors if
             self.node_anchored else None)
         pos_b = utils.batch_nx_graphs(pos_b, anchors=pos_b_anchors if
@@ -431,7 +526,9 @@ class DiskDataSourceMulti(DiskDataSource):
             self.node_anchored else None)
         neg_b = utils.batch_nx_graphs(neg_b, anchors=neg_b_anchors if
             self.node_anchored else None)
-        return pos_a, pos_b, neg_a, neg_b
+        return pos_a, pos_b, neg_a, neg_b, nx_graphs
+    
+    
 
 class DiskImbalancedDataSource(OTFSynDataSource):
     """ Imbalanced on-the-fly real data.
@@ -501,13 +598,21 @@ class DiskImbalancedDataSource(OTFSynDataSource):
                 print("loaded", fn)
                 pos_a, pos_b, neg_a, neg_b = pickle.load(f)
         print(len(pos_a), len(neg_a))
+        
+        nx_graphs = (
+            deepcopy(pos_a),
+            deepcopy(pos_b),
+            deepcopy(neg_a),
+            deepcopy(neg_b),
+        )
+        
         if pos_a:
             pos_a = utils.batch_nx_graphs(pos_a)
             pos_b = utils.batch_nx_graphs(pos_b)
         neg_a = utils.batch_nx_graphs(neg_a)
         neg_b = utils.batch_nx_graphs(neg_b)
         self.batch_idx += 1
-        return pos_a, pos_b, neg_a, neg_b
+        return pos_a, pos_b, neg_a, neg_b, nx_graphs
 
 if __name__ == "__main__":
     import matplotlib.pyplot as plt

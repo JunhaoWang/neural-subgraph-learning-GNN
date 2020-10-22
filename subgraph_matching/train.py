@@ -46,6 +46,7 @@ def build_model(args):
     elif args.method_type == "mlp":
         model = models.BaselineMLP(1, args.hidden_dim, args)
     model.to(utils.get_device())
+    print('** DEVICE: ', utils.get_device())
     if args.test and args.model_path:
         model.load_state_dict(torch.load(args.model_path,
             map_location=utils.get_device()))
@@ -90,15 +91,22 @@ def train(args, model, logger, in_queue, out_queue):
         data_source = make_data_source(args)
         loaders = data_source.gen_data_loaders(args.eval_interval *
             args.batch_size, args.batch_size, train=True)
+        c = -1
         for batch_target, batch_neg_target, batch_neg_query in zip(*loaders):
-            msg, _ = in_queue.get()
-            if msg == "done":
-                done = True
-                break
+            # msg, _ = in_queue.get()
+            # if msg == "done":
+            #     done = True
+            #     break
             # train
+            c += 1
+            if c == 100:
+                done = True
+                print("Saving")
+                torch.save(model.state_dict(), args.model_path)
+                break
             model.train()
             model.zero_grad()
-            pos_a, pos_b, neg_a, neg_b = data_source.gen_batch(batch_target,
+            pos_a, pos_b, neg_a, neg_b, _ = data_source.gen_batch(batch_target,
                 batch_neg_target, batch_neg_query, True)
             emb_pos_a, emb_pos_b = model.emb_model(pos_a), model.emb_model(pos_b)
             emb_neg_a, emb_neg_b = model.emb_model(neg_a), model.emb_model(neg_b)
@@ -126,11 +134,17 @@ def train(args, model, logger, in_queue, out_queue):
                 clf_loss.backward()
                 clf_opt.step()
             pred = pred.argmax(dim=-1)
-            acc = torch.mean((pred == labels).type(torch.float))
+            # import pdb; pdb.set_trace()
+            acc = torch.mean(((1-pred) == labels).type(torch.float))
+            acc_ = torch.mean((pred == labels).type(torch.float))
             train_loss = loss.item()
             train_acc = acc.item()
-
-            out_queue.put(("step", (loss.item(), acc)))
+            train_acc_ = acc_.item()
+            print('Loss/ACC: ', c, train_loss, train_acc, train_acc_)
+            with open('performance.txt', 'a') as f:
+                f.write(' '.join(['Loss/ACC: ', str(c), str(train_loss), str(train_acc), str(train_acc_)]))
+                f.write('/n')
+            # out_queue.put(("step", (loss.item(), acc)))
 
 def train_loop(args):
     # if not os.path.exists(os.path.dirname(args.model_path)):
@@ -158,47 +172,81 @@ def train_loop(args):
         clf_opt = None
 
     data_source = make_data_source(args)
-    loaders = data_source.gen_data_loaders(args.val_size, args.batch_size,
-        train=False, use_distributed_sampling=False)
-    test_pts = []
-    for batch_target, batch_neg_target, batch_neg_query in zip(*loaders):
-        pos_a, pos_b, neg_a, neg_b = data_source.gen_batch(batch_target,
-            batch_neg_target, batch_neg_query, False)
-        if pos_a:
-            pos_a = pos_a.to(torch.device("cpu"))
-            pos_b = pos_b.to(torch.device("cpu"))
-        neg_a = neg_a.to(torch.device("cpu"))
-        neg_b = neg_b.to(torch.device("cpu"))
-        test_pts.append((pos_a, pos_b, neg_a, neg_b))
-        break
-    workers = []
-    for i in range(args.n_workers):
-        worker = mp.Process(target=train, args=(args, model, data_source,
-            in_queue, out_queue))
-        worker.start()
-        workers.append(worker)
 
-    if args.test:
-        validation(args, model, test_pts, logger, 0, 0, verbose=True)
-    else:
-        batch_n = 0
-        for epoch in range(args.n_batches // args.eval_interval):
-            for i in range(args.eval_interval):
-                in_queue.put(("step", None))
-            for i in range(args.eval_interval):
-                msg, params = out_queue.get()
-                train_loss, train_acc = params
-                print("Batch {}. Loss: {:.4f}. Training acc: {:.4f}".format(
-                    batch_n, train_loss, train_acc), end="               \r")
-                # logger.add_scalar("Loss/train", train_loss, batch_n)
-                # logger.add_scalar("Accuracy/train", train_acc, batch_n)
-                batch_n += 1
-            # validation(args, model, test_pts, logger, batch_n, epoch)
+    batch_n = 0
+    for epoch in range(args.n_batches // args.eval_interval):
+        train(args, model, data_source,
+            in_queue, out_queue)
 
-    for i in range(args.n_workers):
-        in_queue.put(("done", None))
-    for worker in workers:
-        worker.join()
+        
+# def train_loop(args):
+#     if not os.path.exists(os.path.dirname(args.model_path)):
+#         os.makedirs(os.path.dirname(args.model_path))
+#     if not os.path.exists("plots/"):
+#         os.makedirs("plots/")
+
+#     print("Starting {} workers".format(args.n_workers))
+#     in_queue, out_queue = mp.Queue(), mp.Queue()
+
+#     print("Using dataset {}".format(args.dataset))
+
+#     record_keys = ["conv_type", "n_layers", "hidden_dim",
+#         "margin", "dataset", "dataset_type", "max_graph_size", "skip"]
+#     args_str = ".".join(["{}={}".format(k, v)
+#         for k, v in sorted(vars(args).items()) if k in record_keys])
+#     logger = SummaryWriter(comment=args_str)
+
+#     model = build_model(args)
+#     model.share_memory()
+
+#     if args.method_type == "order":
+#         clf_opt = optim.Adam(model.clf_model.parameters(), lr=args.lr)
+#     else:
+#         clf_opt = None
+
+#     data_source = make_data_source(args)
+#     loaders = data_source.gen_data_loaders(args.val_size, args.batch_size,
+#         train=False, use_distributed_sampling=False)
+#     test_pts = []
+#     for batch_target, batch_neg_target, batch_neg_query in zip(*loaders):
+#         pos_a, pos_b, neg_a, neg_b = data_source.gen_batch(batch_target,
+#             batch_neg_target, batch_neg_query, False)
+#         if pos_a:
+#             pos_a = pos_a.to(torch.device("cpu"))
+#             pos_b = pos_b.to(torch.device("cpu"))
+#         neg_a = neg_a.to(torch.device("cpu"))
+#         neg_b = neg_b.to(torch.device("cpu"))
+#         test_pts.append((pos_a, pos_b, neg_a, neg_b))
+
+#     workers = []
+#     for i in range(args.n_workers):
+#         worker = mp.Process(target=train, args=(args, model, data_source,
+#             in_queue, out_queue))
+#         worker.start()
+#         workers.append(worker)
+
+#     if args.test:
+#         validation(args, model, test_pts, logger, 0, 0, verbose=True)
+#     else:
+#         batch_n = 0
+#         for epoch in range(args.n_batches // args.eval_interval):
+#             for i in range(args.eval_interval):
+#                 in_queue.put(("step", None))
+#             for i in range(args.eval_interval):
+#                 msg, params = out_queue.get()
+#                 train_loss, train_acc = params
+#                 print("Batch {}. Loss: {:.4f}. Training acc: {:.4f}".format(
+#                     batch_n, train_loss, train_acc), end="               \r")
+#                 logger.add_scalar("Loss/train", train_loss, batch_n)
+#                 logger.add_scalar("Accuracy/train", train_acc, batch_n)
+#                 batch_n += 1
+#             validation(args, model, test_pts, logger, batch_n, epoch)
+
+#     for i in range(args.n_workers):
+#         in_queue.put(("done", None))
+#     for worker in workers:
+#         worker.join()
+        
 
 def main(force_test=False):
     mp.set_start_method("spawn", force=True)
